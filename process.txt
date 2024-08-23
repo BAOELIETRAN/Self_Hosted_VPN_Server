@@ -1,0 +1,241 @@
+configure FireWall rules
+switch the ip_forwarding on
+to make the system switch the ip_forwarding on everytime it boots up (which means it will always let ip packet 
+go from 1 interface to another interface and to be routed through the network), we need to uncomment in 
+sysctl.conf: 			net.ipv4.ip_forwarding = 1
+
+Set up a ip table (basically a firewall)
+Set up firewall is much easier with ufw (uncomplicated firewall)
+
+To check whether the ufw is active or not, we need to be root
+ufw status
+
+Before we turn that on, we need to make sure it has some rules
+
+Example:
+ufw allow ssh (allow TCP port 22)
+
+If we want to allow VPN traffic, we can:
+ufw allow 1194/udp	(port/protocol)
+
+Do some config file for ufw:
+Since we want to route the packets through the Internet, we need to set the firewall rule:
+				DEFAULT_FORWARD_POLICY = "ACCEPT"
+forward policy: go through
+input policy: incoming
+
+Next, we want to enable NAT and Masquerading in clients.
+Config /etc/ufw/before.rules
+-A POSTROUTING -s 10.8.0.0/8 -o eth0 -j MASQUERADE
+	-A POSTROUTING: append the rule to the POSTROUTING chain, which processes packets
+			just before they leave the network interface
+	-s 10.8.0.0/8: specify the source address range
+		       which should match the VPN client addresses.
+	Example: If our VPN server assigns IP Addresses to clients in the 10.8.0.0/8 range,
+		 then the rule -s 10.8.0.0/8 will apply to any packet from any IP address within this range,
+		 such as 10.8.1.1, 10.8.1.100,...
+		 --> ensure that any traffic from VPN clients, will be processed by the NAT and
+		     the masquerading rules.
+		 --> allow VPN clients to access the internet or other networks through the VPN servers.
+	-o eth0: specify the rule applies to packet leaving through the eth0 int.
+	-j MASQUERADE: tell the firewall to perform masquerading, which hide the internal IP Address
+		       of VPN client by replacing them with the public IP Address of the eth0 int.
+
+PKI - key exchange for secure VPN
+genrate some keys
+
+generate the 2048 bit Diffie-Hellman pem file we pointed to in the openvpn config
+Build certificate
+CA key passphrase: Oberlinisthebest@123
+CA also needs their own key pair to exchange data 
+--> build key
+
+--> we need CA to sign keys for both server and client.
+
+steps:
+	1. Initialize the PKI
+	2. Build the CA
+	3. Generate the Server Certificate and Key
+	4. Sign the Server certificate with the CA
+		./easyrsa sign-req server server
+	5. Generate DH Parameters
+	6. Generate a Certificate Revocation List (CRL) 
+		Use to revoke certificates from client.
+		./easyrsa gen-crl
+	7. Copy the certificates and keys to OpenVPN directory
+
+good news is that when we sign the certificate for server by using CA, we already had public key inside it.
+
+When we run ./easyrsa gen-req server, easy-rsa generate a private key and a signing request for server.
+The CSR contains the public key.
+When we run ./easyrsa sign-req server server, the CSR is signed by our CA to create a server certificate.
+This certificate contains the public key.
+
+CA --> gen private key, gen certificate signing request(+public key) --> CA --> certificate(+public key)
+
+check the server.conf to ensure that the parameters are correct
+and run the VPN server
+
+service openvpn start
+service openvpn status
+
+Typically, the process of exchanging CSR to CA does not need to be secret.
+The CA uses the public key in the CSR to decrypt the signature and compars it with the
+hash of the CSR data it computes.
+--> match --> CA can trust the CSR --> CA sign it with its own private key
+
+TODO: set up easyrsa on clients, and set up them as VPN clients. 
+      read carefully how CA, servers, and clients work together.
+
+Tried to use Ansible to automate the process of installing easyRSA on clients.
+But when the client get the private key and CSR, it needs to send them to the CA to sign.
+After signing them, CA sends back the certificate for them.
+--> Need to implement the whole process before use Ansible to automate anything.
+*** Use ansible.builtin.script to run the script on the machine we send the script to by Ansible.
+	--> Find out how to answer the question from easyrsa (hostname, password,....)
+
+Continue:
+Each client should have its own keys, if someone loses the laptop, we can revoke the keys
+and someone else can use that.
+If uncomment duplicate-cn --> everybody can have the same key
+--> allow multiple clients to connect concurrently, even if they use certificates with the same CN.
+--> useful in scenarios where the same cert is used on multiple device.
+
+when we generate CSR and private key for client, 
+	if we use this: 		./easyrsa gen-req client_1 
+	--> it will require us to use pem passphrase to protect the key
+	if we use this:			./easyrsa gen-req client_1 nopass
+	--> it will not
+
+after creating the private key and CSR for client, request the CA to sign its request:
+			./easyrsa sign-req client client_1
+
+copy config file from sample-config-files to new folder client_1 in the root's home dir.
+change the name from client.conf to xxx.ovpn (since our client software expects a .ovpn file)
+
+Take the ca.crt, client.crt, client.key, and pineapple.ovpn.
+
+
+****ERROR LOG*****
+At first, the tun0 interface did not come up, so I need to fix it myself:
+To run the openvpn server, we need to use: 	systemctl start openvpn@server
+When I run this command, the error is: 
+	Active: activating (auto-restart) (Result: exit-code)
+	...
+	code = exited, status = 1/FAILURE
+	--> indicate that the OpenVPN service is failing to start correctly and is repeatedly
+	    attempting to restart
+	--> status = 1/FAILURE suggests that there was an error in the config or execution
+	    of OpenVPN service.
+--> when I check for the journal of OpenVPN (journalctl -u openvpn@server), I see that:
+				Cannot pre-load keyfile (ta.key)
+--> missing ta.key file --> generate: openvpn --genkey /etc/openvpn/ta.key
+I restart the openvpn server:	systemctl restart openvpn@server
+But when I check the journal, there is still a problem, it says that it can not find the GID of nobody.
+--> I use "id nobody" to know what group the "nobody" belongs to.
+--> The group is nogroup, not nobody --> I change to group nogroup in server.conf.
+And then the openvpn runs perfectly, and the tun0 interfaces pop up!
+
+*****NOTE******:
+I change the hostname/ip and port line in pineapple.ovpn to this computer's internal IP and port,
+but after that we need to set a static IP for this computer.
+Besides, we also comment out the line with ca crt, server key, server crt, since we want to create
+an unified file, which means we bring those 3 files and merge them together with pineapple.ovpn like XML syntax.
+
+Sending data using NetCat is very SEX since netcat by default sends all its traffic without encryption.
+--> To send pineapple.ovpn to clients, we use scp --> like cp command but with ssh.
+
+We know that we will use scp from the client side to copy the ovpn file from the server:
+				scp root@192.168.1.176:/client_1/pineapple.ovpn
+But when we deploy the virtual machine on Linode, we forget that the virtual machine is on public network,
+but our machine is in local network --> cannot reach.
+	1. Deploy a Linux machine locally.
+	2. Push the server to be local.
+ssh connection refused.
+
+****MISSING SSH*****
+Install OpenSSH-server, then run:
+sudo systemctl enable --now ssh
+Then check status optionally:
+systemctl status ssh
+And verify it's up.
+
+Expose port 22:
+sudo ufw allow ssh
+
+On client machine, SSH in:
+ssh baoelietran@bodayconyeu
+
+After that, we need to copy the ta.key file and ovpn file to the host machine,
+and put them inside the same folder.
+After that, run the ovpn file:	sudo openvpn pineapple.ovpn
+If it says Initialization Sequence Complete --> successfully connect to VPN server.
+--> Now, all the traffic from the client will go through the vpn server.
+
+When the client successfully connect to the VPN server, it can not reach out to the Internet.
+The reason is we did not set the ip_forwarding to 1.
+To check for the status of ip_forwarding: 
+			sudo sysctl net.ipv4.ip_forward
+if the answer is 1 --> good
+if the answer is 0 --> change:		sudo sysctl -w net.ipv4.ip_forward=1
+--> then the machine will connect to the Internet.
+
+Next step: how to make the server become public by setting the static IP for server.
+Setting up the static IP for server:
+		Edit the file /etc/netplan/01-network-manager-all.yaml
+we should back up the file in case we want to remove static config and come back using DHCP.
+
+Ubuntu uses Netplan as the default network management tool.
+Configuration files for Netplan are written in YAML.
+Content of the yaml file:
+network:
+  version: 2			#using network definition version 2
+  renderer: NetworkManager	#renderer that controls the overall network
+****Edit the Netplan config file****:
+after we got the renderer, we will add ethernets(or wifis, or modems, or bridges)
+and refer to the network adapter name.
+Since we want to set up the static IP, so we don't want the dynamic IP from DHCP server.
+Specify the static IP.
+To check for the default gateway:	ip route | grep default
+After being done with the static address and default gateway, we will need DNS server.
+The gateway4 is deprecated, we need to use new syntax:
+network:
+  version: 2
+  renderer: NetworkManager
+  wifis:
+    wlp3s0:
+      dhcp4: no
+      addresses: 
+        - 192.168.1.176/24
+      routes:
+        - to:  default
+          via: 192.168.1.1
+      nameservers:
+        addresses: 
+          - 8.8.8.8
+          - 8.8.8.4
+      access-points:
+        "Netgear58":
+          password: "Magicalfire555"
+If we want to config a public IP address, we need to take that from agency.
+
+****TO DO*****:
+Done configuring vpn, use ansible to automate client
+
+
+****ERROR SSH******:
+Although I use ufw to set up rules for firewall, to be specific, I have allowed 
+the ssh connection, but I still can not connect to the host via ssh.
+--> 2 posibility:
+	- Did not install OpenSSH yet.
+		Check: ssh -V
+	- ssh was disabled on client machine.
+		Check: systemctl status ssh
+		If disabled:
+		       systemctl start ssh
+
+Gen the ssh key and run the command:
+ansible-playbook -i inventory/hosts vpn_setup.yml
+ --ssh-common-args='-o StrictHostKeyChecking=no' -u kali --private-key ~/.ssh/id_rsa
+
+

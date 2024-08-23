@@ -1,0 +1,20 @@
+- name: vpn_setup
+  hosts: vpn_hosts
+  tasks:
+    - name: Ping all the hosts
+      ansible.builtin.ping:
+
+    - name: Print message
+      ansible.builtin.debug:
+        msg: Ping successfully
+
+    - name: Run the script on server
+      ansible.builtin.script: ~/Self_Hosted_VPN_Server/automate.sh
+
+    - name: Copy file to remote
+      copy:
+        src: ~/client_1/for_guest
+        dest: ~/vpn_test
+
+      
+        
