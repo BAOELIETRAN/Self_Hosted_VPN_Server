@@ -238,4 +238,4 @@ Gen the ssh key and run the command:
 ansible-playbook -i inventory/hosts vpn_setup.yml
  --ssh-common-args='-o StrictHostKeyChecking=no' -u kali --private-key ~/.ssh/id_rsa
 
-
+Using ansible and then automate the sending process of ovpn file and ta.key file to host in VPN
